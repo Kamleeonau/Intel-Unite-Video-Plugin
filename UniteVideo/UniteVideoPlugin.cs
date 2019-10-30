@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Threading;
 using Microsoft.Win32;
 using System.IO;
+using System.Net;
 
 namespace UniteVideoPlugin
 {
@@ -37,6 +38,9 @@ namespace UniteVideoPlugin
 
         private const String VLCparams = "--fullscreen --control=rc --rc-quiet --rc-host=localhost:9876 --intf=none --no-video-title-show";
 
+        private const int MAX_RECV_BUFFER = 1024;
+        private const int LISTEN_PORT = 5050;
+
         private String VLCPath = null; // need to read this from the registry at startup
 
         private PluginInfo myInfo = new PluginInfo();
@@ -45,10 +49,14 @@ namespace UniteVideoPlugin
 
         private String HubText = "";
         private bool hasDVD = false;
+        private bool currentMediaIsDVD = false;
 
         private Process VLCProcess = null;
         private TcpClient ControlSocket = new TcpClient();
-        
+        private TcpListener URLSocketListener = new TcpListener(IPAddress.Any, LISTEN_PORT);
+
+        // Load HTTP listener
+        private HTTPServer HTTP = new HTTPServer();
 
         private async void ConnectVLC_Async()
         {
@@ -111,6 +119,7 @@ namespace UniteVideoPlugin
             }
         }
 
+        
         private void ParseVLC_Message(String message)
         {
             if (message.Length > 19 & message.Substring(0, 13) == "status change")
@@ -123,7 +132,7 @@ namespace UniteVideoPlugin
                 switch (state[0])
                 {
                     case "play state":
-                        if (state[1] == "2")
+                        if (state[1] == "3")
                         {
                             LogMessage("Playing", null);
                             PlayerState = VLC_State.Playing;
@@ -139,7 +148,7 @@ namespace UniteVideoPlugin
                         {
                             LogMessage("Stopped", null);
                             PlayerState = VLC_State.Stopped;
-                            ShowHubToast("Playback stopped", ResourceToBytes(new Uri("/UniteVideoPlugin;component/disc.png", System.UriKind.Relative)), 1);
+                            //ShowHubToast("Playback stopped", ResourceToBytes(new Uri("/UniteVideoPlugin;component/disc.png", System.UriKind.Relative)), 1);
                             HubText = "";
                             FireHubTextUpdated();
                             FireIsHubBackgroundTransparent(false);
@@ -196,8 +205,7 @@ namespace UniteVideoPlugin
             // no optical drive found
             return null;
         }
-
-
+        
         private async void MonitorDVD_Async()
         {
             FireUIUpdated();
@@ -231,13 +239,52 @@ namespace UniteVideoPlugin
             }
         }
 
+        private void URLSocket_OnConnect(IAsyncResult ar)
+        {
+            // get ready for a new connection
+            URLSocketListener.BeginAcceptTcpClient(new AsyncCallback(URLSocket_OnConnect), null);
+
+            byte[] recv_buffer = new byte[MAX_RECV_BUFFER];
+
+            TcpClient clientSocket = URLSocketListener.EndAcceptTcpClient(ar);
+
+            LogMessage("Got connection", null);
+            // do something here
+            NetworkStream stream = clientSocket.GetStream();
+            stream.ReadTimeout = 10000; // 10 second timeout before we boot the client
+            try
+            {
+                int bytesRead = stream.Read(recv_buffer, 0, MAX_RECV_BUFFER);
+                LogMessage(String.Format("Read {0} bytes from network stream", bytesRead), null);
+                String url = Encoding.ASCII.GetString(recv_buffer,0,bytesRead);
+                // some sanity checking would be nice
+
+                LogMessage(url, null);
+                HubText = "Video Loading. Please wait...";
+                currentMediaIsDVD = false;
+                FireHubTextUpdated();
+                SendCommand("clear");
+                SendCommand("add " + url);
+
+            }
+            catch (Exception)
+            {
+                LogMessage("Error reading from socket", null);
+            }
+
+            // close the socket
+            LogMessage("Closing connection", null);
+            clientSocket.Close();
+
+        }
+
         public void UniteVideo()
         {
             // set up the info object
             myInfo.Id = new Guid(MAIN_GUID);
             myInfo.Company = "P.A. Price";
-            myInfo.Description = "DVD Video Playback Controls";
-            myInfo.Name = "DVD Video Playback";
+            myInfo.Description = "Native Video Playback Controls";
+            myInfo.Name = "Native Video Playback";
 
             myUI.pluginInfo = myInfo;
 
@@ -257,10 +304,15 @@ namespace UniteVideoPlugin
             VLCProcess.Start();
             LogMessage("Process started", null);
 
-            ConnectVLC_Async(); // connect toe the VLC remote control interface
+            ConnectVLC_Async(); // connect to the VLC remote control interface
             ReadVLC_Async(); // prepare to read VLC output
             PokeVLC_Async(); // stimulate VLC to send us output
             MonitorDVD_Async(); // be on the lookout for DVD drives appearing and disappearing
+
+            // listen for incoming URLs
+            URLSocketListener.Start();
+            URLSocketListener.BeginAcceptTcpClient(new AsyncCallback(URLSocket_OnConnect), null);
+
         }
 
 
@@ -278,7 +330,7 @@ namespace UniteVideoPlugin
         {
             // set up the UI
             myUI.Groups = new List<PluginUIElementGroup>();
-            vidGroup.GroupName = "DVD Playback Controls";
+            vidGroup.GroupName = "Native Video";
             vidGroup.ImageBytes = ResourceToBytes(new Uri("/UniteVideoPlugin;component/disc.png", System.UriKind.Relative));
             vidGroup.UIElements = new List<PluginUIElement>();
 
@@ -289,30 +341,46 @@ namespace UniteVideoPlugin
             bool dvdReady = ((dvd != null) && dvd[1] == "True");
             LogMessage("Call to GetUI, dvd readystate is: " + dvdReady.ToString(), null);
 
-            if (dvdReady)
+            // -------------------- ROW 1 --------------------
+            // play or pause button
+            if (PlayerState == VLC_State.Playing)
+            {
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(PAUSE), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/pause.png", System.UriKind.Relative))));
+            }
+            else if (PlayerState == VLC_State.Paused || dvdReady)
+            {
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(PLAY), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/play.png", System.UriKind.Relative))));
+            }
+            else
+            {
+                // dvd drive is not yet ready and we don't have a URL
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(INACTIVE), UIElementType.Button, "No Disc", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/play_grey.png", System.UriKind.Relative))));
+            }
+
+            if (PlayerState != VLC_State.Stopped)
             {
                 // -------------------- ROW 1 --------------------
-                // play or pause button
-                if (PlayerState == VLC_State.Playing)
-                {
-                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(PAUSE), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/pause.png", System.UriKind.Relative))));
-                }
-                else
-                {
-                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(PLAY), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/play.png", System.UriKind.Relative))));
-                }
-
+                // play or pause button handled already
+                
                 // all other buttons should be disabled if we are not currently playing
 
                 // dynamically enabled / disabled
-                if (PlayerState != VLC_State.Stopped)
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(REWIND), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/rewind.png", System.UriKind.Relative))));
+                if (currentMediaIsDVD)
                 {
-                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(REWIND), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/rewind.png", System.UriKind.Relative))));
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(NAV_UP), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/nav_up.png", System.UriKind.Relative))));
-                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(SEEK), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/seek.png", System.UriKind.Relative))));
+                }
+                else
+                {
+                    // placeholder
+                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(INACTIVE), UIElementType.Button, "", "", null));
+                }
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(SEEK), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/seek.png", System.UriKind.Relative))));
 
-                    // -------------------- ROW 2 --------------------
-                    vidGroup.UIElements.Add(new PluginUIElement(new Guid(STOP), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/stop.png", System.UriKind.Relative))));
+                // -------------------- ROW 2 --------------------
+                vidGroup.UIElements.Add(new PluginUIElement(new Guid(STOP), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/stop.png", System.UriKind.Relative))));
+                if (currentMediaIsDVD)
+                {
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(NAV_LEFT), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/nav_left.png", System.UriKind.Relative))));
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(NAV_OK), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/nav_ok.png", System.UriKind.Relative))));
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(NAV_RIGHT), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/nav_right.png", System.UriKind.Relative))));
@@ -322,22 +390,13 @@ namespace UniteVideoPlugin
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(SKIP_BACK), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/skip_back.png", System.UriKind.Relative))));
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(NAV_DOWN), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/nav_down.png", System.UriKind.Relative))));
                     vidGroup.UIElements.Add(new PluginUIElement(new Guid(SKIP_FORWARD), UIElementType.Button, "", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/skip_forward.png", System.UriKind.Relative))));
-
                 }
-            }
-            else
-            {
-                // dvd drive is not yet ready
-                vidGroup.UIElements.Add(new PluginUIElement(new Guid(INACTIVE), UIElementType.Button, "No Disc", "", ResourceToBytes(new Uri("/UniteVideoPlugin;component/play_grey.png", System.UriKind.Relative))));
-            }
-            
+                
 
-            // do we have a dvd drive available?
-            
-            if (hasDVD)
-            {
-                myUI.Groups.Add(vidGroup);
             }
+            // add the playback control to the main UI
+            myUI.Groups.Add(vidGroup);
+            
 
             return myUI;
         }
@@ -347,6 +406,7 @@ namespace UniteVideoPlugin
             LogMessage("!!!!!! Video Playback Plugin Loading !!!!!!", null);
             UniteVideo();
             LogMessage("!!!!!! Video Playback Plugin Loaded Successfully !!!!!!", null);
+
         }
 
         public override void UIElementEvent(UIEventArgs e)
@@ -369,6 +429,7 @@ namespace UniteVideoPlugin
                         FireHubTextUpdated();
                         SendCommand("clear");
                         SendCommand("add \"dvd:///" + DriveState[0] + "\"");
+                        currentMediaIsDVD = true;
                         //SendCommand("play");
                         break;
                     }

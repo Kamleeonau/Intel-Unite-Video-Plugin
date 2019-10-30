@@ -1,0 +1,7 @@
+{
+  "name": "au.com.paprice.intelunite",
+  "description": "Helper App for Intel Unite(R) Solution Native Playback",
+  "path": "UniteVideoBrowserExtensionHelper.exe",
+  "type": "stdio",
+  "allowed_extensions": [ "intelunite@paprice.com.au" ]
+}

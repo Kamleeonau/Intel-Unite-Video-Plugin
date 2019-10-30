@@ -1,0 +1,35 @@
+{
+  "author":  "Phil Price",
+  "description": "Natively play back web video on an Intel Unite(R) Hub. Intel, the Intel logo and Intel Unite are trademarks of Intel Corporation or its subsidiaries in the U.S. and/or other countries.",
+  "manifest_version": 2,
+  "name": "Intel Unite(R) Solution Native Web Playback",
+  "version": "1.0.1",
+  "icons": {
+    "48": "icons/intel-logo48.png"
+  },
+
+  "applications": {
+    "gecko": {
+      "id": "intelunite@paprice.com.au",
+      "strict_min_version": "50.0",
+      "update_url": "https://unite.gyc.tas.edu.au/uniteextension/mozilla.json"
+    }
+  },
+
+  "background": {
+    "scripts": [ "background.js" ],
+    "persistent": false
+  },
+
+  "browser_action": {
+    "default_icon": {
+      "16": "icons/intel-logo16.png",
+      "32": "icons/intel-logo32.png",
+      "48": "icons/intel-logo48.png",
+      "128": "icons/intel-logo128.png"
+    }
+  },
+  
+  "permissions": ["nativeMessaging", "<all_urls>"]
+
+}
